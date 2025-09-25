@@ -27,10 +27,8 @@
     "coverage": "nyc --reporter=lcov npm test"
   },
   "dependencies": {
-    "@rodrigogs/mysql-events": "^0.6.0",
-    "@rodrigogs/zongji": "^0.4.14",
-    "@vlasky/zongji": "^0.5.9",
-    "mysql2": "^3.15.1"
+    "mysql2": "^3.15.1",
+    "powersync-mysql-zongji": "^0.0.0-dev-20241008084109"
   },
   "devDependencies": {
     "chai": "^4.2.0",
