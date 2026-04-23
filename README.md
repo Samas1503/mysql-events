@@ -1,242 +1,293 @@
-# mysql-events
-[![CircleCI](https://circleci.com/gh/rodrigogs/mysql-events.svg)](https://circleci.com/gh/rodrigogs/mysql-events)
-[![Code Climate](https://codeclimate.com/github/rodrigogs/mysql-events/badges/gpa.svg)](https://codeclimate.com/github/rodrigogs/mysql-events)
-[![Test Coverage](https://codeclimate.com/github/rodrigogs/mysql-events/badges/coverage.svg)](https://codeclimate.com/github/rodrigogs/mysql-events/coverage)
+# @samas1503/mysql-events
 
-A [node.js](https://nodejs.org) package that watches a MySQL database and runs callbacks on matched events.
+A [node.js](https://nodejs.org) package that watches a MySQL database and runs callbacks on matched events like updates on tables and/or specific columns.
 
-This package is based on the [original ZongJi](https://github.com/nevill/zongji) and the [original mysql-events](https://github.com/spencerlambert/mysql-events) modules. Please make sure that you meet the requirements described at [ZongJi](https://github.com/rodrigogs/zongji#installation), like MySQL binlog etc.
+This package is a fork of [rodrigogs/mysql-events](https://github.com/rodrigogs/mysql-events), updated to use [`mysql2`](https://github.com/sidorares/node-mysql2) and [`powersync-mysql-zongji`](https://github.com/powersync-ja/mysql-zongji) for MySQL 8 compatibility.
 
-Check [@kuroski](https://github.com/kuroski)'s [mysql-events-ui](https://github.com/kuroski/mysql-events-ui) for a `mysql-events` UI implementation.
+## Requirements
+
+- MySQL with **binlog enabled** in `ROW` format
+- A MySQL user with `REPLICATION SLAVE` and `REPLICATION CLIENT` privileges
+
+```sql
+CREATE USER 'zongji'@'%' IDENTIFIED BY 'your_password';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT, SELECT ON *.* TO 'zongji'@'%';
+FLUSH PRIVILEGES;
+```
+
+Also make sure your MySQL config has:
+```ini
+[mysqld]
+log_bin           = mysql-bin
+binlog_format     = ROW
+binlog_row_image  = FULL
+server-id         = 1
+```
 
 ## Install
+
 ```sh
-npm install @rodrigogs/mysql-events
+npm install @samas1503/mysql-events
+```
+
+Or install directly from GitHub:
+
+```sh
+npm install github:Samas1503/mysql-events#master
 ```
 
 ## Quick Start
+
 ```javascript
-const mysql = require('mysql');
-const MySQLEvents = require('@rodrigogs/mysql-events');
+const ZongJi    = require('powersync-mysql-zongji');
+const MySQLEvents = require('@samas1503/mysql-events');
 
-const program = async () => {
-  const connection = mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: 'root',
-  });
+const MYSQL_CONFIG = {
+  host: 'localhost',
+  user: 'zongji',
+  password: 'your_password',
+  database: 'your_database',
+  charset: 'UTF8MB4_GENERAL_CI',
+  connectTimeout: 60000,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 0,
+};
 
-  const instance = new MySQLEvents(connection, {
+const ZONGJI_CONFIG = {
+  BinlogClass: ZongJi,
+  reconnectTimeout: 10000,
+  connectionOptions: {
+    readTimeout: 0,
+    writeTimeout: 0,
+  },
+};
+
+(async () => {
+  const instance = new MySQLEvents(MYSQL_CONFIG, ZONGJI_CONFIG);
+
+  await instance.start({
+    includeEvents: ['writerows', 'updaterows', 'deleterows'],
+    includeSchema: { your_database: ['your_table'] }, // optional filter
     startAtEnd: true,
-    excludedSchemas: {
-      mysql: true,
-    },
   });
 
-  await instance.start();
+  console.log('Listening for binlog events...');
 
+  // Listen to raw binlog events
+  instance.on('binlog', (evt) => {
+    if (!evt.tableMap) return;
+    console.log(evt.getEventName(), evt.tableMap[evt.tableId]?.tableName);
+    console.log(evt.rows);
+  });
+
+  // Listen to structured trigger events (via addTrigger)
   instance.addTrigger({
-    name: 'TEST',
-    expression: '*',
+    name: 'MY_TRIGGER',
+    expression: 'your_database.your_table',
     statement: MySQLEvents.STATEMENTS.ALL,
-    onEvent: (event) => { // You will receive the events here
+    onEvent: (event) => {
       console.log(event);
     },
   });
-  
+
   instance.on(MySQLEvents.EVENTS.CONNECTION_ERROR, console.error);
   instance.on(MySQLEvents.EVENTS.ZONGJI_ERROR, console.error);
-};
 
-program()
-  .then(() => console.log('Waiting for database events...'))
-  .catch(console.error);
+  process.on('SIGINT', async () => {
+    await instance.stop();
+    process.exit(0);
+  });
+})();
 ```
-[Check the examples](https://github.com/rodrigogs/mysql-events/examples)
+
+## Reconnection Example
+
+```javascript
+const ZongJi    = require('powersync-mysql-zongji');
+const MySQLEvents = require('@samas1503/mysql-events');
+
+const MYSQL_CONFIG = { /* ... */ };
+const ZONGJI_CONFIG = { BinlogClass: ZongJi };
+
+let instance;
+
+async function start() {
+  instance = new MySQLEvents(MYSQL_CONFIG, ZONGJI_CONFIG);
+
+  await instance.start({
+    includeEvents: ['writerows', 'updaterows', 'deleterows'],
+    startAtEnd: true,
+  });
+
+  instance.on('binlog', (evt) => {
+    // handle event
+  });
+
+  instance.on(MySQLEvents.EVENTS.CONNECTION_ERROR, (err) => {
+    console.error('Connection error:', err.message);
+    if (['ETIMEDOUT', 'ER_NET_READ_INTERRUPTED', 'PROTOCOL_CONNECTION_LOST'].includes(err.code)) {
+      instance.stop().catch(() => {});
+      setTimeout(start, 5000);
+    }
+  });
+
+  instance.binlogListener?.on('error', (err) => {
+    console.error('Binlog error:', err.message);
+    setTimeout(start, 5000);
+  });
+}
+
+start();
+```
 
 ## Usage
-  ### #constructor(connection, options)
-  - Instantiate and create a database connection using a DSN
-    ```javascript
-    const dsn = {
-      host: 'localhost',
-      user: 'username',
-      password: 'password',
-    };
 
-    const myInstance = new MySQLEvents(dsn, { /* ZongJi options */ });
-    ```
+### `new MySQLEvents(connection, options)`
 
-  - Instantiate and create a database connection using a preexisting connection
-    ```javascript
-    const connection = mysql.createConnection({
-      host: 'localhost',
-      user: 'username',
-      password: 'password',
-    });
+| Argument     | Type     | Description |
+|------------- |----------|-------------|
+| `connection` | `Object` | mysql2-compatible config object |
+| `options`    | `Object` | ZongJi options. Must include `BinlogClass` from `powersync-mysql-zongji` |
 
-    const myInstance = new MySQLEvents(connection, { /* ZongJi options */ });
-    ```
-  - Options(the second argument) is for ZongJi options
-    ```javascript
-    const myInstance = new MySQLEvents({ /* connection */ }, {
-      serverId: 3,
-      startAtEnd: true,
-    });
-    ```
-    [See more about ZongJi options](https://github.com/rodrigogs/zongji#zongji-class)
+```javascript
+const instance = new MySQLEvents(
+  { host, user, password, database },
+  { BinlogClass: ZongJi, reconnectTimeout: 10000 }
+);
+```
 
-  ### #start()
-  - start function ensures that MySQL is connected and ZongJi is running before resolving its promise
-    ```javascript
-    myInstance.start()
-      .then(() => console.log('I\'m running!'))
-      .catch(err => console.error('Something bad happened', err));
-    ```
-  ### #stop()
-  - stop function terminates MySQL connection and stops ZongJi before resolving its promise
-    ```javascript
-    myInstance.stop()
-      .then(() => console.log('I\'m stopped!'))
-      .catch(err => console.error('Something bad happened', err));
-    ```
-  ### #pause()
-  - pause function pauses MySQL connection until `#resume()` is called, this it useful when you're receiving more data than you can handle at the time
-    ```javascript
-    myInstance.pause();
-    ```
-  ### #resume()
-  - resume function resumes a paused MySQL connection, so it starts to generate binlog events again
-    ```javascript
-    myInstance.resume();
-    ```
-  ### #addTrigger({ name, expression, statement, onEvent })
-  - Adds a trigger for the given expression/statement and calls the `onEvent` function when the event happens
-    ```javascript
-    instance.addTrigger({
-      name: 'MY_TRIGGER',
-      expression: 'MY_SCHEMA.MY_TABLE.MY_COLUMN',
-      statement: MySQLEvents.STATEMENTS.INSERT,
-      onEvent: async (event) => {
-        // Here you will get the events for the given expression/statement.
-        // This could be an async function.
-        await doSomething(event);
-      },
-    });
-    ```
-  - The `name` argument must be unique for each expression/statement, it will be user later if you want to remove a trigger
-    ```javascript
-    instance.addTrigger({
-      name: 'MY_TRIGGER',
-      expression: 'MY_SCHEMA.*',
-      statement: MySQLEvents.STATEMENTS.ALL,
-      ...
-    });
+---
 
-    instance.removeTrigger({
-      name: 'MY_TRIGGER',
-      expression: 'MY_SCHEMA.*',
-      statement: MySQLEvents.STATEMENTS.ALL,
-    });
-    ```
-  - The `expression` argument is very dynamic, you can replace any step by `*` to make it wait for any schema, table or column events
-    ```javascript
-    instance.addTrigger({
-      name: 'Name updates from table USERS at SCHEMA2',
-      expression: 'SCHEMA2.USERS.name',
-      ...
-    });
-    ```
-    ```javascript
-    instance.addTrigger({
-      name: 'All database events',
-      expression: '*',
-      ...
-    });
-    ```
-    ```javascript
-    instance.addTrigger({
-      name: 'All events from SCHEMA2',
-      expression: 'SCHEMA2.*',
-      ...
-    });
-    ```
-    ```javascript
-    instance.addTrigger({
-      name: 'All database events for table USERS',
-      expression: '*.USERS',
-      ...
-    });
-    ```
-  - The `statement` argument indicates in which database operation an event should be triggered
-    ```javascript
-    instance.addTrigger({
-      ...
-      statement: MySQLEvents.STATEMENTS.ALL,
-      ...
-    });
-    ```
-    [Allowed statements](https://github.com/rodrigogs/mysql-events/blob/master/lib/STATEMENTS.enum.js)
-  - The `onEvent` argument is a function where the trigger events should be threated
-    ```javascript
-    instance.addTrigger({
-      ...
-      onEvent: (event) => {
-        console.log(event); // { type, schema, table, affectedRows: [], affectedColumns: [], timestamp, }
-      },
-      ...
-    });
-    ```
-  ### #removeTrigger({ name, expression, statement })
-  - Removes a trigger from the current instance
-    ```javascript
-    instance.removeTrigger({
-      name: 'My previous created trigger',
-      expression: '',
-      statement: MySQLEvents.STATEMENTS.INSERT,
-    });
-    ```
-  ### Instance events
-  - MySQLEvents class emits some events related to its MySQL connection and ZongJi instance
-    ```javascript
-    instance.on(MySQLEvents.EVENTS.CONNECTION_ERROR, (err) => console.log('Connection error', err));
-    instance.on(MySQLEvents.EVENTS.ZONGJI_ERROR, (err) => console.log('ZongJi error', err));
-    ```
-  [Available events](https://github.com/rodrigogs/mysql-events/blob/master/lib/EVENTS.enum.js)
+### `instance.start(binlogOptions)`
 
-## Tigger event object
-It has the following structure:
+Connects to MySQL, resolves the current binlog position (if `startAtEnd: true`) and starts the ZongJi listener.
+
+```javascript
+await instance.start({
+  includeEvents: ['writerows', 'updaterows', 'deleterows'],
+  includeSchema: { my_db: ['table1', 'table2'] }, // optional
+  startAtEnd: true,
+});
+```
+
+---
+
+### `instance.stop()`
+
+Stops ZongJi and closes the MySQL connection.
+
+```javascript
+await instance.stop();
+```
+
+---
+
+### `instance.pause()` / `instance.resume()`
+
+Pause and resume the binlog listener without closing the connection. Useful when processing is slower than the event rate.
+
+```javascript
+instance.pause();
+// ... later
+instance.resume();
+```
+
+---
+
+### `instance.addTrigger({ name, expression, statement, onEvent })`
+
+Adds a structured trigger that fires on matching schema/table/column events.
+
+```javascript
+instance.addTrigger({
+  name: 'MY_TRIGGER',
+  expression: 'my_schema.my_table.my_column', // or wildcards: 'my_schema.*'
+  statement: MySQLEvents.STATEMENTS.INSERT,
+  onEvent: async (event) => {
+    await doSomething(event);
+  },
+});
+```
+
+**Expression wildcards:**
+
+| Expression              | Matches                                 |
+|-------------------------|-----------------------------------------|
+| `*`                     | All schemas, tables and columns         |
+| `my_schema.*`           | All tables in `my_schema`              |
+| `*.my_table`            | `my_table` in any schema               |
+| `my_schema.my_table`    | Specific table                          |
+| `my_schema.my_table.col`| Specific column                         |
+
+---
+
+### `instance.removeTrigger({ name, expression, statement })`
+
+Removes a previously added trigger.
+
+```javascript
+instance.removeTrigger({
+  name: 'MY_TRIGGER',
+  expression: 'my_schema.my_table',
+  statement: MySQLEvents.STATEMENTS.INSERT,
+});
+```
+
+---
+
+### Instance Events
+
+| Event                              | Description                          |
+|------------------------------------|--------------------------------------|
+| `MySQLEvents.EVENTS.STARTED`       | Emitted when the listener starts     |
+| `MySQLEvents.EVENTS.STOPPED`       | Emitted when the listener stops      |
+| `MySQLEvents.EVENTS.PAUSED`        | Emitted on pause                     |
+| `MySQLEvents.EVENTS.RESUMED`       | Emitted on resume                    |
+| `MySQLEvents.EVENTS.BINLOG`        | Raw binlog event from ZongJi         |
+| `MySQLEvents.EVENTS.TRIGGER_ERROR` | Error thrown inside a trigger        |
+| `MySQLEvents.EVENTS.CONNECTION_ERROR` | MySQL connection error             |
+| `MySQLEvents.EVENTS.ZONGJI_ERROR`  | ZongJi internal error                |
+
+```javascript
+instance.on(MySQLEvents.EVENTS.CONNECTION_ERROR, console.error);
+instance.on(MySQLEvents.EVENTS.ZONGJI_ERROR, console.error);
+instance.on(MySQLEvents.EVENTS.BINLOG, (evt) => console.log(evt));
+```
+
+---
+
+### Statements
+
+| Constant                    | SQL Operation |
+|-----------------------------|---------------|
+| `MySQLEvents.STATEMENTS.ALL`    | INSERT + UPDATE + DELETE |
+| `MySQLEvents.STATEMENTS.INSERT` | INSERT only   |
+| `MySQLEvents.STATEMENTS.UPDATE` | UPDATE only   |
+| `MySQLEvents.STATEMENTS.DELETE` | DELETE only   |
+
+---
+
+## Trigger Event Object
+
+When using `addTrigger`, the `onEvent` callback receives:
+
 ```javascript
 {
   type: 'INSERT | UPDATE | DELETE',
-  schema: 'SCHEMA_NAME',
-  table: 'TABLE_NAME',
-  affectedRows: [{
-    before: {
-      column1: 'A',
-      column2: 'B',
-      column3: 'C',
-      ...
-    },
-    after: {
-      column1: 'D',
-      column2: 'E',
-      column3: 'F',
-      ...
-    },
-  }],
-  affectedColumns: [
-    'column1',
-    'column2',
-    'column3',
+  schema: 'schema_name',
+  table: 'table_name',
+  affectedRows: [
+    {
+      before: { column1: 'old_value', ... },
+      after:  { column1: 'new_value', ... },
+    }
   ],
+  affectedColumns: ['column1', 'column2'],
   timestamp: 1530645380029,
   nextPosition: 1343,
-  binlogName: 'bin.001',
+  binlogName: 'mysql-bin.000001',
 }
 ```
 
-**Make sure the database user has the privilege to read the binlog on database that you want to watch on.**
-
 ## LICENSE
-[BSD-3-Clause](https://github.com/rodrigogs/mysql-events/blob/master/LICENSE) © Rodrigo Gomes da Silva
+[BSD-3-Clause](https://github.com/Samas1503/mysql-events/blob/master/LICENSE) © Samas1503
